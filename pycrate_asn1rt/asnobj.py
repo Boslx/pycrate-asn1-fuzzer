@@ -27,7 +27,7 @@
 # * Authors : Benoit Michau 
 # *--------------------------------------------------------
 #*/
-
+from .asn1fuzz import Asn1Container
 from .utils   import *
 from .err     import *
 from .refobj  import *
@@ -619,181 +619,221 @@ class ASN1Obj(Element):
         if hasattr(self, '_const_tab_at') and self._const_tab_at is not None:
             const['tab_at']   = self._const_tab_at
         return const
-    
-    def get_proto(self, w_opt=False, w_enum=False,
-                        print_ext=False,
-                        print_unbound=False,
-                        print_strbound=0,
-                        print_unalignbound=False,
-                        print_recurs=False,
-                        blacklist=set()):
+
+    def get_unique_ident(self, dictionary, ident) -> int:
+        if type(ident) is tuple:
+            ident = ident[1]
+
+        if ident in dictionary:
+            dictionary[ident] += 1
+            result = f"{ident}_{dictionary[ident]}"
+        else:
+            dictionary[ident] = 1
+            result = ident
+
+        return result
+
+    def get_proto(self, w_open=True, w_opt=False, w_enum=True,
+                  print_recurs=True,
+                  blacklist=set(),
+                  base_ident="root",
+                  ident_history={},
+                  sequence_member_count=1) -> Asn1Container:
         """
-        returns the prototype of the object
-        
+        Returns a hierarchical representation of the ASN.1 object structure.
+
+        This method generates an Asn1Container object that represents the structure
+        of the ASN.1 object, including its components and their types.
+
         Args:
-            w_opt       : bool
-                          if True, add (OPT) to every optional component name
-            w_enum      : bool
-                          if True, list the content of the ENUMERATED
-            print_ext   : bool,
-                          if True, print paths that lead to extensible objects
-                          ENUMERATED, CHOICE, SEQUENCE, SET, CLASS
-            print_unbound : bool,
-                          if True, print paths that lead to unbounded objects
-                          INTEGER, BIT STRING, OCTET STRING, *String, SEQUENCE OF, SET OF
-            print_strbound : int,
-                          if not null, print BIT STRING, OCTET STRING and *String
-                          for which size constraint's upper bound is over the given value
-            print_unalignbound (not implemeted): bool,
-                          if True, print paths that lead to object with bound
-                          unaligned to a power of 2
-            print_recurs : bool,
-                          if True, print paths that lead to recursion
-            blacklist   : set of str,
-                          list of blacklisted constructed object names, that won't 
-                          be expanded
-        
+            w_open: If True, includes the content of OPEN objects. Defaults to True.
+            w_opt: If True, adds "(OPT)" to the names of optional components. Defaults to False.
+            w_enum: If True, lists the content of ENUMERATED types. Defaults to True.
+            print_recurs: If True, prints messages indicating recursive paths. Defaults to True.
+            blacklist: A set of object names to exclude. Defaults to an empty set.
+            base_ident: The base identifier for the object. Defaults to "root".
+            ident_history: A dictionary to keep track of used identifiers. Defaults to an empty dictionary.
+            sequence_member_count: The initial count for sequence members. Defaults to 1.
+
         Returns:
-            type: str if self is of basic type, 
-                  2-tuple (type_str, content_dict) if self is of constructed type
+            Asn1Container: An object representing the structure of the ASN.1 object.
+                          This can be a simple Asn1Container with type information for basic types,
+                          or a nested structure for constructed types.
         """
+
         if not hasattr(self, '_proto_recur'):
             root = True
             self._proto_recur = [id(self)]
-            self._proto_path  = []
+            self._proto_path = []
         else:
             root = False
-        #
-        if self.TYPE in {TYPE_OPEN, TYPE_ANY}:
-            if self._name not in blacklist:
-                cont = ASN1Dict()
+
+        if self._parent != None and self._parent.TYPE == TYPE_CHOICE:
+            sequence_member_count = 1
+
+        base_ident = self.get_unique_ident(ident_history, base_ident)
+
+        if self.TYPE in (TYPE_OPEN, TYPE_ANY):
+            if w_open and self._name not in blacklist:
+                cont = {}
                 for (ident, Comp) in self._get_const_tr().items():
                     if isinstance(ident, str_types):
                         continue
+
                     if id(Comp) in self._proto_recur:
                         if print_recurs:
-                            print('[+] recursive %s, %s.%s: %r'\
-                                  % (self.TYPE, self._name, Comp._name, self._proto_path + [ident]))
-                        cont[ident] = Comp.TYPE
+                            asnlog('[+] recursion detected: %s, at path %r' \
+                                   % (Comp._name, self._proto_path + [ident]))
+                        cont[ident] = Asn1Container(self.get_unique_ident(ident_history, ident), "EXPANDABLE",
+                                                    Comp._opt, Comp)
                     else:
                         Comp._proto_recur = self._proto_recur + [id(Comp)]
-                        Comp._proto_path  = self._proto_path  + [ident]
+                        Comp._proto_path = self._proto_path + [ident]
                         cont[ident] = Comp.get_proto(
-                            w_opt, w_enum,
-                            print_ext, print_unbound, print_strbound, print_unalignbound, print_recurs,
-                            blacklist)
+                            w_open,
+                            w_opt,
+                            w_enum,
+                            print_recurs,
+                            blacklist,
+                            ident,
+                            ident_history,
+                            sequence_member_count
+                        )
                         del Comp._proto_recur, Comp._proto_path
-                ret = (self.TYPE, cont)
+                if len(cont) > 0:
+                    ret = Asn1Container(base_ident, self.TYPE, self._opt, cont, sequence_member_count=sequence_member_count)
+                else:
+                    # A type container without any elements is not interesting, we have to remove them
+                    ret = Asn1Container(base_ident, "EXPANDABLE", self._opt, None)
             else:
-                ret = self.TYPE
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, sequence_member_count=sequence_member_count)
         #
-        elif self.TYPE in {TYPE_CHOICE, TYPE_SEQ, TYPE_SET, TYPE_CLASS}:
-            if print_ext and self._ext is not None:
-                print('[+] extensible %s, %s: %r' % (self.TYPE, self._name, self._proto_path))
+        elif self.TYPE in (TYPE_CHOICE, TYPE_SEQ, TYPE_SET, TYPE_CLASS):
             if self._name not in blacklist:
-                cont = ASN1Dict()
+                cont = {}
                 for (ident, Comp) in self._cont.items():
-                    if w_opt and hasattr(self, '_root_opt') and ident in self._root_opt:
+                    if w_opt and hasattr(self, '_root_mand') and ident not in self._root_mand:
                         ident_ret = '%s (OPT)' % ident
                     else:
                         ident_ret = ident
                     if id(Comp) in self._proto_recur:
                         if print_recurs:
-                            print('[+] recursive %s, %s.%s: %r'\
-                                  % (self.TYPE, self._name, Comp._name, self._proto_path + [ident]))
-                        cont[ident_ret] = Comp.TYPE
+                            asnlog('[+] recursion detected: %s, at path %r' \
+                                   % (Comp._name, self._proto_path + [ident]))
+                        cont[ident] = Asn1Container(self.get_unique_ident(ident_history, ident), "EXPANDABLE",
+                                                    Comp._opt, Comp)
+
                     else:
                         Comp._proto_recur = self._proto_recur + [id(Comp)]
-                        Comp._proto_path  = self._proto_path  + [ident]
+                        Comp._proto_path = self._proto_path + [ident]
                         cont[ident_ret] = Comp.get_proto(
-                            w_opt, w_enum,
-                            print_ext, print_unbound, print_strbound, print_unalignbound, print_recurs,
-                            blacklist)
+                            w_open,
+                            w_opt,
+                            w_enum,
+                            print_recurs,
+                            blacklist,
+                            ident_ret,
+                            ident_history)
                         del Comp._proto_recur, Comp._proto_path
-                ret = (self.TYPE, cont)
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, cont, sequence_member_count=sequence_member_count)
             else:
-                ret = self.TYPE
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, sequence_member_count=sequence_member_count)
         #
-        elif self.TYPE in {TYPE_SEQ_OF, TYPE_SET_OF}:
-            if print_unbound \
-            and (self._const_sz is None or self._const_sz.ub is None or self._const_sz.ext is not None):
-                print('[+] unbounded %s, %s: %r' % (self.TYPE, self._name, self._proto_path))
+        elif self.TYPE in (TYPE_SEQ_OF, TYPE_SET_OF):
             Comp = self._cont
             if id(Comp) in self._proto_recur:
                 if print_recurs:
-                    print('[+] recursive %s, %s.%s: %r'\
-                           % (self.TYPE, self._name, Comp._name, self._proto_path + [None]))
-                ret = self.TYPE
+                    asnlog('[+] recursion detected: %s, at path %r' \
+                           % (Comp._name, self._proto_path + [None]))
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, sequence_member_count=sequence_member_count)
             else:
                 Comp._proto_recur = self._proto_recur + [id(Comp)]
-                Comp._proto_path  = self._proto_path  + [None]
-                ret = (
+                Comp._proto_path = self._proto_path + [None]
+                ret = Asn1Container(
+                    base_ident,
                     self.TYPE,
+                    self._opt,
                     self._cont.get_proto(
-                            w_opt, w_enum,
-                            print_ext, print_unbound, print_strbound, print_unalignbound, print_recurs,
-                            blacklist)
-                    )
+                        w_open,
+                        w_opt,
+                        w_enum,
+                        print_recurs,
+                        blacklist,
+                        base_ident,
+                        ident_history,
+                        sequence_member_count * self._const_sz.ub if self._const_sz != None and self._const_sz.ub != None else 999
+                    ),
+                    None if self._const_sz is None else (self._const_sz.lb, self._const_sz.ub, self._const_sz.rdyn),
+                    sequence_member_count=sequence_member_count
+                )
+
                 del Comp._proto_recur, Comp._proto_path
         #
-        elif self.TYPE in {TYPE_BIT_STR, TYPE_OCT_STR}:
-            if print_unbound \
-            and (self._const_sz is None or self._const_sz.ub is None or self._const_sz.ext is not None):
-                print('[+] unbounded %s, %s: %r' % (self.TYPE, self._name, self._proto_path))
-            if print_strbound \
-            and (self._const_sz and self._const_sz.ub and self._const_sz.ub > print_strbound):
-                print('[+] bounded %s, %s, max sz %i: %r' % (self.TYPE, self._name, self._const_sz.ub, self._proto_path))
-            if self._const_cont:
-                Comp = self._const_cont
-                if id(Comp) in self._proto_recur:
-                    if print_recurs:
-                        asnlog('[+] recursive %s, %s.%s: %r'\
-                               % (self.TYPE, self._name, Comp._name, self._proto_path + [None]))
-                    ret = self.TYPE
-                else:
-                    Comp._proto_recur = self._proto_recur + [id(Comp)]
-                    Comp._proto_path  = self._proto_path  + [None]
-                    ret = (
-                        self.TYPE,
-                        self._const_cont.get_proto(
-                            w_opt, w_enum,
-                            print_ext, print_unbound, print_strbound, print_unalignbound, print_recurs,
-                            blacklist)
-                        )
-                    del Comp._proto_recur, Comp._proto_path
+        elif self.TYPE in (TYPE_BIT_STR, TYPE_OCT_STR) and self._const_cont:
+            Comp = self._const_cont
+            if id(Comp) in self._proto_recur:
+                if print_recurs:
+                    asnlog('[+] recursion detected: %s, at path %r' \
+                           % (Comp._name, self._proto_path + [None]))
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, sequence_member_count=sequence_member_count)
             else:
-                ret = self.TYPE
+                Comp._proto_recur = self._proto_recur + [id(Comp)]
+                Comp._proto_path = self._proto_path + [None]
+                ret = Asn1Container(
+                    base_ident,
+                    self.TYPE,
+                    self._opt,
+                    self._const_cont.get_proto(
+                        w_open,
+                        w_opt,
+                        w_enum,
+                        print_recurs,
+                        blacklist,
+                        base_ident,
+                        ident_history,
+                        sequence_member_count
+                    ),
+                    sequence_member_count=sequence_member_count
+                )
+                del Comp._proto_recur, Comp._proto_path
         #
-        elif self.TYPE == TYPE_ENUM:
-            if print_ext and self._ext is not None:
-                print('[+] extensible %s, %s: %r' % (self.TYPE, self._name, self._proto_path))
-            if w_enum:
-                enum = self._root[:]
-                if self._ext is not None:
-                    enum.append('...')
-                    enum.extend(self._ext)
-                ret = (self.TYPE, enum)
-            else:
-                ret = self.TYPE
+        elif self.TYPE == TYPE_ENUM and w_enum:
+            enum = self._root[:]
+            # if self._ext is not None:
+            #    enum.append('...')
+            #    enum.extend(self._ext)
+            ret = Asn1Container(base_ident, self.TYPE, self._opt, enum, sequence_member_count=sequence_member_count)
         #
         else:
-            assert( self.TYPE in set(TYPES_BASIC + TYPES_EXT) )
-            if print_unbound:
-                if self.TYPE in set(TYPES_STRING) \
-                and (self._const_sz is None or self._const_sz.ub is None or self._const_sz.ext is not None):
-                    print('[+] unbounded %s, %s: %r' % (self.TYPE, self._name, self._proto_path))
-                elif self.TYPE in {TYPE_INT, TYPE_REAL} \
-                and (self._const_val is None or self._const_val.ub is None or self._const_val.ext is not None):
-                    print('[+] unbounded %s, %s: %r' % (self.TYPE, self._name, self._proto_path))
-            if print_strbound and self.TYPE in set(TYPES_STRING) \
-            and (self._const_sz and self._const_sz.ub and self._const_sz.ub > print_strbound):
-                print('[+] bounded %s, %s, max sz %i: %r' % (self.TYPE, self._name, self._const_sz.ub, self._proto_path))
-            ret = self.TYPE
-        #
+            assert (self.TYPE in TYPES_BASIC + TYPES_EXT)
+            if (self._const_val != None):
+                nestedValues = None
+                if (hasattr(self, '_cont_rev')):
+                    nestedValues = self._cont_rev
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, nestedValues,
+                                    (self._const_val.lb, self._const_val.ub, self._const_val.rdyn),
+                                    sequence_member_count=sequence_member_count)
+            elif (self.TYPE == "BIT STRING" or self.TYPE == "IA5String" or self.TYPE == "NumericString"
+                  or self.TYPE == "UTF8String" or self.TYPE == "OCTET STRING"):
+                content = None
+                bound = None
+
+                if (hasattr(self, "_cont_rev")):
+                    content = self._cont_rev
+
+                if (hasattr(self, "_const_sz") and self._const_sz != None):
+                    bound = (self._const_sz.lb, self._const_sz.ub, self._const_sz.rdyn)
+
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, content, bound,
+                                    sequence_member_count=sequence_member_count)
+            else:
+                ret = Asn1Container(base_ident, self.TYPE, self._opt, sequence_member_count=sequence_member_count)
+
         if root:
             del self._proto_recur, self._proto_path
+
         return ret
-    
+
     def get_complexity(self, blacklist=set()):
         """
         returns the number of basic types objects referenced from self,

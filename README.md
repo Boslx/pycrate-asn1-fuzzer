@@ -1,3 +1,13 @@
+What is pycrate-asn1-fuzzer
+===========================
+This fork of `pycrate` was developed as part of my master's thesis to enable fuzzing with ASN.1 specifications. It extends the original `pycrate` library with functionality to generate random data conforming to ASN.1 structures, aiding in the discovery of vulnerabilities and inconsistencies in systems that utilize ASN.1.
+
+While this fuzzer aims to be comprehensive, ASN.1's complexity means there might be edge cases or specific constructs that are not yet fully supported or may lead to unexpected behavior.
+
+For usage instructions and examples, refer to [test_fuzz.py](test/test_fuzz.py) and [asn1fuzz.py](pycrate_asn1rt/asn1fuzz.py).
+
+If you find this fuzzer useful or encounter any issues, please don't hesitate to provide feedback or contribute to its development. I am very interested in any kind of application of this tool :D
+
 What is pycrate
 ===============
 
